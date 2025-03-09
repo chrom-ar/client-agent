@@ -1,4 +1,5 @@
 import { DirectClient } from "@elizaos/client-direct";
+import { ChromaClient } from "@elizaos/client-chroma";
 import {
     type Adapter,
     AgentRuntime,
@@ -22,6 +23,7 @@ import {
 import { defaultCharacter } from "./defaultCharacter.ts";
 
 import { bootstrapPlugin } from "@elizaos/plugin-bootstrap";
+
 import JSON5 from 'json5';
 
 import fs from "fs";
@@ -766,6 +768,7 @@ async function startAgent(
 
         // add to container
         directClient.registerAgent(runtime);
+        ChromaClient.start(runtime);
 
         // report to console
         elizaLogger.debug(`Started ${character.name} as ${runtime.agentId}`);
