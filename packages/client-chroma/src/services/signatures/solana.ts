@@ -32,7 +32,7 @@ export class SolanaSignatureHandler extends BaseSignatureHandler {
         // Convert private key from base58 string to Uint8Array
         const secretKey = bs58.decode(privateKey);
         this.keypair = Keypair.fromSecretKey(secretKey);
-      } else {
+      } else if (this.runtime.getSetting('TEE_MODE') !== 'OFF') {
         elizaLogger.debug('Using TEE-based signing for Solana');
         const teeMode = this.runtime.getSetting('TEE_MODE');
         const walletSecretSalt = this.runtime.getSetting('WALLET_SECRET_SALT');
@@ -52,7 +52,9 @@ export class SolanaSignatureHandler extends BaseSignatureHandler {
         this.keypair = Keypair.fromSecretKey(secretKey);
       }
 
-      elizaLogger.debug(`Solana account initialized: ${this.keypair.publicKey.toString()}`);
+      if (this.keypair) {
+        elizaLogger.debug(`Solana account initialized: ${this.keypair.publicKey.toString()}`);
+      }
     } catch (error) {
       elizaLogger.error('Failed to initialize Solana account:', error);
     }

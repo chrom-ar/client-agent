@@ -18,7 +18,7 @@ import { SignatureHandlerInterface } from './signatures/types';
 import { ChainAccount } from './signatures/types';
 import { isCryptoGoal } from './goal/utils';
 import { GoalHandlerInterface } from './goal/types';
-import { SingleChainGoalHandler, MultiChainGoalHandler, CDPGoalHandler } from './goal/handlers';
+import { SingleChainGoalHandler, MultiChainGoalHandler, CDPGoalHandler, AutoYieldGoalHandler } from './goal/handlers';
 
 const GOAL_CHECK_INTERVAL = 10000;
 
@@ -65,12 +65,14 @@ export class ChromaService extends Service {
     const singleChainHandler = new SingleChainGoalHandler();
     const multiChainHandler = new MultiChainGoalHandler();
     const cdpHandler = new CDPGoalHandler();
+    const autoYieldHandler = new AutoYieldGoalHandler();
 
     await singleChainHandler.initialize(runtime);
     await multiChainHandler.initialize(runtime);
     await cdpHandler.initialize(runtime);
+    await autoYieldHandler.initialize(runtime);
 
-    this.handlers = [singleChainHandler, cdpHandler, multiChainHandler];
+    this.handlers = [singleChainHandler, cdpHandler, multiChainHandler, autoYieldHandler];
 
     this.startGoalChecking();
   }

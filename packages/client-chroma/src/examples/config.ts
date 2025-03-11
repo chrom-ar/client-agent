@@ -25,6 +25,11 @@ export const EXAMPLE_CONFIGS: Record<string, ExampleConfig> = {
     operation: 'Bridge 1.5 USDC from Sepolia to Solana',
     type: 'single'
   },
+  deposit_dai_on_optimism: {
+    name: 'Deposit DAI on Optimism',
+    operation: 'Generate yield via deposit 19.966634 DAI on Optimism',
+    type: 'single'
+  },
   deposit_usdc_on_optimism: {
     name: 'Deposit USDC on Optimism',
     operation: 'Generate yield via deposit 19.962961 USDC on Optimism',
@@ -40,6 +45,11 @@ export const EXAMPLE_CONFIGS: Record<string, ExampleConfig> = {
     operation: 'Find the best yield for USDC on Optimism and Arbitrum',
     type: 'multi'
   },
+  find_best_yield_single_chain: {
+    name: 'Find Best Yield Example',
+    operation: 'Find the best yield for USDC on Optimism',
+    type: 'single'
+  },
   swap_sol: {
     name: 'Swap SOL Example',
     operation: 'Swap 0.01 SOL for USDC',
@@ -53,6 +63,11 @@ export const EXAMPLE_CONFIGS: Record<string, ExampleConfig> = {
   swap_eth_on_base: {
     name: 'Swap ETH on Base Example',
     operation: 'Swap 0.01 ETH for USDC on Base',
+    type: 'single'
+  },
+  swap_usdc_for_dai_on_optimism: {
+    name: 'Swap USDC for DAI on Optimism',
+    operation: 'Swap 19.967080 USDC for DAI on Optimism',
     type: 'single'
   },
   swap_usdc_for_usdc_e_on_optimism: {
@@ -72,7 +87,7 @@ export const EXAMPLE_CONFIGS: Record<string, ExampleConfig> = {
   },
   withdraw_usdc_from_optimism: {
     name: 'Withdraw USDC from Optimism',
-    operation: 'Withdraw 0.148241 USDC from Optimism',
+    operation: 'Withdraw 19.967076 USDC from Optimism',
     type: 'single'
   },
   withdraw_usdc_from_curve_optimism: {
