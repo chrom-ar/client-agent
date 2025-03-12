@@ -106,7 +106,7 @@ export async function validateOperationResponse(
   response: any,
   chainDetailsText: string,
   runtime: IAgentRuntime
-): Promise<boolean> {
+): Promise<{ isValid: boolean; reason: string }> {
   // Fast path: if this is clearly a bridge intent with the required fields, accept it immediately
   if (response?.intent?.type === 'BRIDGE' ||
      (response?.intent &&
@@ -114,7 +114,7 @@ export async function validateOperationResponse(
       response?.intent?.recipientChain?.includes('sepolia') &&
       response?.intent?.amount)) {
     elizaLogger.info('✅ Fast-track validating bridge intent: VALID');
-    return true;
+    return { isValid: true, reason: 'Valid bridge intent with all required fields' };
   }
 
   // Similarly if this is a withdraw intent with the required fields
@@ -124,7 +124,7 @@ export async function validateOperationResponse(
       response?.intent?.amount &&
       response?.intent?.fromAddress)) {
     elizaLogger.info('✅ Fast-track validating withdraw intent: VALID');
-    return true;
+    return { isValid: true, reason: 'Valid withdraw intent with all required fields' };
   }
 
   // More detailed model-based validation for other cases
@@ -176,16 +176,22 @@ Your decision should default to "continue: true" unless there's a clear problem.
     elizaLogger.info(`📝 Intent validation result: ${validationResult.continue ? 'VALID' : 'INVALID'}`);
     elizaLogger.info(`📝 Reason: ${validationResult.reason}`);
 
-    return validationResult.continue;
+    return { 
+      isValid: validationResult.continue, 
+      reason: validationResult.reason 
+    };
   } catch (error) {
     elizaLogger.error('❌ Error in intent validation:', error);
     // If validation fails for technical reasons, default to accept the intent
     elizaLogger.info('📝 Defaulting to VALID due to validation error');
-    return true;
+    return { 
+      isValid: true, 
+      reason: 'Default to valid due to validation error: ' + (error instanceof Error ? error.message : String(error))
+    };
   }
 }
 
-export async function validateIntroResponse(responses: any[], runtime: IAgentRuntime): Promise<boolean> {
+export async function validateIntroResponse(responses: any[], runtime: IAgentRuntime): Promise<{ isValid: boolean; reason: string }> {
   const introValidationPrompt = `# TASK: Determine if this is a valid introduction response.
 
 Responses received:
@@ -205,11 +211,40 @@ A response should be considered INVALID only if:
 3. Is empty or nonsensical
 4. Ask for wallet address or chain, not related to an operation but in general
 
-Answer only with "true" for valid responses or "false" for invalid ones.`;
+Return an object with:
+- "continue": boolean, true for valid responses or false for invalid ones
+- "reason": brief explanation for your decision`;
 
-  return await generateTrueOrFalse({
-    runtime,
-    context: introValidationPrompt,
-    modelClass: ModelClass.SMALL
-  });
+  try {
+    // Define schema with zod
+    const validationSchema = z.object({
+      continue: z.boolean().describe('Whether the response is valid'),
+      reason: z.string().describe('Brief explanation for the decision')
+    });
+
+    const result = await generateObject({
+      runtime,
+      context: introValidationPrompt,
+      schema: validationSchema,
+      modelClass: ModelClass.SMALL
+    });
+
+    const validationResult = result.object as z.infer<typeof validationSchema>;
+
+    elizaLogger.info(`📝 Intro validation result: ${validationResult.continue ? 'VALID' : 'INVALID'}`);
+    elizaLogger.info(`📝 Reason: ${validationResult.reason}`);
+
+    return { 
+      isValid: validationResult.continue, 
+      reason: validationResult.reason 
+    };
+  } catch (error) {
+    elizaLogger.error('❌ Error in intro validation:', error);
+    // If validation fails for technical reasons, default to accept the response
+    elizaLogger.info('📝 Defaulting to VALID due to validation error');
+    return { 
+      isValid: true, 
+      reason: 'Default to valid due to validation error: ' + (error instanceof Error ? error.message : String(error)) 
+    };
+  }
 }

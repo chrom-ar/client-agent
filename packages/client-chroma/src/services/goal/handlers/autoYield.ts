@@ -156,9 +156,9 @@ Generate only the message text, no additional formatting.`;
         this.storeResponse(goal, responses[0]);
         
         // Validate the intro response
-        const isValid = await validateIntroResponse(responses, this.runtime);
+        const validationResult = await validateIntroResponse(responses, this.runtime);
         
-        if (isValid) {
+        if (validationResult.isValid) {
           await this.completeObjective(goal, 'auto-introduce-agent');
           this.hasIntroduced = true;
           elizaLogger.info('✅ Agent introduction completed');
@@ -167,7 +167,7 @@ Generate only the message text, no additional formatting.`;
           elizaLogger.info('🔄 Triggering balance check after introduction...');
           await this.createBalanceCheckGoal();
         } else {
-          elizaLogger.warn('❌ Introduction response was not valid, retrying...');
+          elizaLogger.warn(`❌ Introduction response was not valid: ${validationResult.reason}`);
           // We could implement a retry mechanism here
           await this.failGoal(goal);
         }
@@ -182,7 +182,17 @@ Generate only the message text, no additional formatting.`;
     try {
       elizaLogger.info('🔄 Starting balance check...');
       
-      const balanceContext = `# TASK: Generate a simple message to check wallet balances.
+      // Maximum number of attempts to get a valid balance response
+      const MAX_BALANCE_CHECK_ATTEMPTS = 3;
+      let attempts = 0;
+      let validBalanceResponse = false;
+      let responses;
+
+      while (!validBalanceResponse && attempts < MAX_BALANCE_CHECK_ATTEMPTS) {
+        attempts++;
+        elizaLogger.info(`Balance check attempt ${attempts}/${MAX_BALANCE_CHECK_ATTEMPTS}`);
+
+        const balanceContext = `# TASK: Generate a simple message to check wallet balances.
 
 Generate a concise message that asks for the current balances in the connected wallet.
 The message should:
@@ -191,39 +201,125 @@ The message should:
 3. Use very few words
 4. Be natural and conversational
 5. Not include additional explanations
+${attempts > 1 ? '6. Emphasize you need the specific balance amounts (with numbers) for each token' : ''}
 
 Generate only the message text, no additional formatting.`;
 
-      const balanceMessage = await generateText({
-        runtime: this.runtime,
-        context: balanceContext,
-        modelClass: ModelClass.SMALL
-      });
+        const balanceMessage = await generateText({
+          runtime: this.runtime,
+          context: balanceContext,
+          modelClass: ModelClass.SMALL
+        });
 
-      elizaLogger.info('🤖 Agent says:', balanceMessage);
-      const responses = await this.sendMessage(balanceMessage);
-      elizaLogger.info('💬 Chroma replies:', responses);
+        elizaLogger.info('🤖 Agent says:', balanceMessage);
+        responses = await this.sendMessage(balanceMessage);
+        elizaLogger.info('💬 Chroma replies:', responses);
 
-      if (responses && responses.length > 0) {
-        this.storeResponse(goal, responses[0]);
+        if (responses && responses.length > 0) {
+          this.storeResponse(goal, responses[0]);
+          
+          // Validate if the response contains balance information
+          const validationResult = await this.validateBalanceResponse(responses[0]);
+          
+          if (validationResult.isValid) {
+            validBalanceResponse = true;
+            elizaLogger.info('✅ Valid balance response received');
+          } else {
+            elizaLogger.warn(`❌ Invalid balance response (attempt ${attempts}/${MAX_BALANCE_CHECK_ATTEMPTS}): ${validationResult.reason}`);
+            // Short delay before retrying
+            if (attempts < MAX_BALANCE_CHECK_ATTEMPTS) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
+        }
+      }
+
+      if (validBalanceResponse) {
         await this.completeObjective(goal, 'check-balance');
         elizaLogger.info('✅ Balance check completed');
 
         // Parse the balance response and create yield goals if needed
         elizaLogger.info('🔄 Analyzing balance response to create yield optimization goals...');
-        await this.parseBalanceResponseAndCreateGoals(responses[0]);
+        await this.parseBalanceResponseAndCreateGoals(responses![0]);
+      } else {
+        elizaLogger.error('❌ Failed to get valid balance response after maximum attempts');
+        await this.failGoal(goal);
       }
     } catch (error) {
       elizaLogger.error('Error during balance check:', error);
+      await this.failGoal(goal);
+    }
+  }
+
+  /**
+   * Validates if a response contains balance information.
+   */
+  private async validateBalanceResponse(response: ChromaResponse): Promise<{ isValid: boolean; reason: string }> {
+    const validationContext = `# TASK: Validate if this response contains balance information.
+
+Response text:
+\`\`\`
+${response.text}
+\`\`\`
+
+A valid balance response should:
+1. Contain specific token balances with numeric values (e.g., "10.5 USDC", "0.5 ETH")
+2. List at least one token balance with a number
+3. Format should generally be like "X.X TOKEN" or similar
+
+Examples of valid balance information:
+- "You have 10.5 USDC, 0.01 ETH, and 5 DAI"
+- "Your wallet contains: 100 USDC"
+- "Balance: 0.5 ETH"
+
+Examples of invalid responses:
+- "I'll check your balances" (no actual balance info)
+- "You don't have any connected wallets" (error message)
+- "What would you like to do with your tokens?" (no balance info)
+
+Respond with:
+1. "continue": Boolean indicating whether the response contains valid balance information
+2. "reason": Brief explanation for your decision`;
+
+    // Define schema with zod
+    const validationSchema = z.object({
+      continue: z.boolean().describe('Whether the response contains valid balance information'),
+      reason: z.string().describe('Brief explanation for the decision')
+    });
+
+    try {
+      const result = await generateObject({
+        runtime: this.runtime,
+        context: validationContext,
+        schema: validationSchema,
+        modelClass: ModelClass.SMALL
+      });
+
+      const validationResult = result.object as z.infer<typeof validationSchema>;
+
+      return {
+        isValid: validationResult.continue,
+        reason: validationResult.reason
+      };
+    } catch (error) {
+      elizaLogger.error('Error validating balance response:', error);
+      // Default to invalid in case of error
+      return {
+        isValid: false,
+        reason: 'Error during validation: ' + (error instanceof Error ? error.message : String(error))
+      };
     }
   }
 
   private async handleFindBestYield(goal: Goal): Promise<void> {
     try {
-      // Extract token from the operation description
+      elizaLogger.info('🔄 Starting best yield search...');
+      
+      // Extract token from the operation
       const operationObjective = goal.objectives.find(obj => obj.id === 'present-operation');
       if (!operationObjective) {
         elizaLogger.error('No operation objective found in goal');
+        await this.failGoal(goal);
         return;
       }
 
@@ -232,6 +328,7 @@ Generate only the message text, no additional formatting.`;
 
       if (!tokenMatch || !tokenMatch[1]) {
         elizaLogger.error('Could not extract token from operation:', operation);
+        await this.failGoal(goal);
         return;
       }
 
@@ -260,9 +357,9 @@ Generate only the message text, no additional formatting.`;
         this.storeResponse(goal, responses[0]);
         
         // Validate the response
-        const isValid = await validateOperationResponse(goal, responses[0], chainDetailsText, this.runtime);
+        const validationResult = await validateOperationResponse(goal, responses[0], chainDetailsText, this.runtime);
         
-        if (isValid) {
+        if (validationResult.isValid) {
           await this.completeObjective(goal, 'find-best-yield');
 
           // Check if there are proposals in the response
@@ -275,7 +372,7 @@ Generate only the message text, no additional formatting.`;
             await this.completeGoal(goal);
           }
         } else {
-          elizaLogger.warn('❌ Yield optimization response not valid, retrying...');
+          elizaLogger.warn(`❌ Yield optimization response not valid: ${validationResult.reason}`);
           // Add retry logic here if needed
           await this.failGoal(goal);
         }
@@ -318,18 +415,24 @@ Generate only the message text, no additional formatting.`;
           this.storeResponse(goal, responses[0]);
           
           // Validate the response
-          const isValid = await validateOperationResponse(goal, responses[0], chainDetailsText, this.runtime);
+          const validationResult = await validateOperationResponse(goal, responses[0], chainDetailsText, this.runtime);
           
-          if (isValid) {
+          if (validationResult.isValid) {
             await this.completeObjective(goal, 'present-operation');
+            
+            // Process next objective immediately after completing this one
+            await this.processObjective(goal);
           } else {
-            elizaLogger.warn('❌ Operation response not valid, retrying...');
+            elizaLogger.warn(`❌ Operation response not valid: ${validationResult.reason}`);
             await this.failGoal(goal);
           }
         }
       } else {
         // We already have a response, just complete the objective
         await this.completeObjective(goal, 'present-operation');
+        
+        // Process next objective immediately
+        await this.processObjective(goal);
       }
     } catch (error) {
       elizaLogger.error('Error during present operation:', error);
@@ -412,6 +515,9 @@ Generate only the confirmation message text.`;
           if (responses && responses.length > 0) {
             this.storeResponse(goal, responses[0]);
             await this.completeObjective(goal, 'confirm-intent');
+            
+            // Process next objective immediately
+            await this.processObjective(goal);
           }
         } else {
           elizaLogger.warn(`❌ Intent validation failed: ${validationResult.reason}`);
@@ -428,6 +534,9 @@ Generate only the confirmation message text.`;
         if (responses && responses.length > 0) {
           this.storeResponse(goal, responses[0]);
           await this.completeObjective(goal, 'confirm-intent');
+          
+          // Process next objective immediately
+          await this.processObjective(goal);
         }
       }
     } catch (error) {
@@ -681,32 +790,126 @@ Generate only the message text, no additional formatting.`;
 
   private async parseBalanceResponseAndCreateGoals(response: ChromaResponse): Promise<void> {
     const text = response.text;
+    
+    // Use a model to extract balance information
+    const balanceExtractionContext = `# TASK: Extract token balances from the response
 
-    // Parse the balance response to find tokens with balances
-    const lines = text.split('\n');
-    const tokenBalances: { token: string, balance: number }[] = [];
+Response text:
+\`\`\`
+${text}
+\`\`\`
 
-    for (const line of lines) {
-      // Look for lines with token balances
-      const balanceMatch = line.match(/- (\d+\.\d+) (\w+)/);
-      if (balanceMatch) {
-        const balance = parseFloat(balanceMatch[1]);
-        const token = balanceMatch[2];
+Extract all token balances from the response above. Focus on finding specific token amounts.
+Look for patterns like "X.X TOKEN", "TOKEN: X.X", "X TOKEN", or any format that indicates a token balance.
 
-        if (balance > AUTO_YIELD_CONFIG.MIN_BALANCE) {
+Monitored tokens to look for: ${AUTO_YIELD_CONFIG.MONITORED_TOKENS.join(', ')}
+Also look for any other tokens that might be present.
+
+For each token found, extract:
+1. The token symbol (e.g., USDC, ETH, DAI)
+2. The balance amount as a number
+
+Return an array of objects, each containing:
+- "token": The token symbol (e.g., "USDC", "ETH", "DAI")
+- "balance": The balance amount as a number (e.g., 10.5, 0.01)
+
+If no tokens are found, return an empty array.`;
+
+    const balanceSchema = z.array(
+      z.object({
+        token: z.string().describe('Token symbol (e.g., "USDC", "ETH", "DAI")'),
+        balance: z.number().describe('Balance amount as a number')
+      })
+    );
+
+    try {
+      const result = await generateObject({
+        runtime: this.runtime,
+        context: balanceExtractionContext,
+        schema: balanceSchema,
+        modelClass: ModelClass.SMALL
+      });
+
+      const extractedBalances = result.object as z.infer<typeof balanceSchema>;
+      
+      elizaLogger.info(`Extracted ${extractedBalances.length} token balances from response`);
+      
+      if (extractedBalances.length === 0) {
+        elizaLogger.warn('No token balances extracted from response');
+        return;
+      }
+
+      // Filter for monitored tokens with balances above minimum threshold
+      const tokenBalances = extractedBalances
+        .filter(item => {
           // Check if this is a monitored token
-          const normalizedToken = this.normalizeToken(token);
-          if (AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(token) || 
-              AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(normalizedToken)) {
-            tokenBalances.push({ token: normalizedToken, balance });
+          const normalizedToken = this.normalizeToken(item.token);
+          return (
+            item.balance > AUTO_YIELD_CONFIG.MIN_BALANCE && 
+            (AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(item.token) || 
+             AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(normalizedToken))
+          );
+        })
+        .map(item => ({
+          token: this.normalizeToken(item.token),
+          balance: item.balance
+        }));
+
+      elizaLogger.info(`Found ${tokenBalances.length} monitored tokens with sufficient balance`);
+      
+      // Create yield goals for each token with a balance
+      for (const { token, balance } of tokenBalances) {
+        await this.createYieldGoal(token, balance);
+      }
+    } catch (error) {
+      elizaLogger.error('Error extracting token balances:', error);
+      
+      // Fallback to regex-based parsing if model extraction fails
+      elizaLogger.info('Falling back to regex-based balance parsing');
+      
+      // Parse the balance response to find tokens with balances using regex
+      const lines = text.split('\n');
+      const tokenBalances: { token: string, balance: number }[] = [];
+
+      for (const line of lines) {
+        // Look for lines with token balances (multiple patterns)
+        const patterns = [
+          /(\d+\.?\d*)\s+(\w+)/,        // "10.5 USDC"
+          /(\w+):\s*(\d+\.?\d*)/,       // "USDC: 10.5"
+          /(\d+\.?\d*)\s*(\w+)/,        // "10.5USDC"
+          /(\w+)\s*balance:\s*(\d+\.?\d*)/i // "USDC balance: 10.5"
+        ];
+
+        for (const pattern of patterns) {
+          const match = line.match(pattern);
+          if (match) {
+            // Determine which group is the token and which is the balance
+            let token, balance;
+            if (isNaN(Number(match[1]))) {
+              token = match[1];
+              balance = parseFloat(match[2]);
+            } else {
+              token = match[2];
+              balance = parseFloat(match[1]);
+            }
+
+            if (balance > AUTO_YIELD_CONFIG.MIN_BALANCE) {
+              // Check if this is a monitored token
+              const normalizedToken = this.normalizeToken(token);
+              if (AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(token) || 
+                  AUTO_YIELD_CONFIG.MONITORED_TOKENS.includes(normalizedToken)) {
+                tokenBalances.push({ token: normalizedToken, balance });
+                break; // Break after finding the first match for this line
+              }
+            }
           }
         }
       }
-    }
 
-    // Create yield goals for each token with a balance
-    for (const { token, balance } of tokenBalances) {
-      await this.createYieldGoal(token, balance);
+      // Create yield goals for each token with a balance
+      for (const { token, balance } of tokenBalances) {
+        await this.createYieldGoal(token, balance);
+      }
     }
   }
 
