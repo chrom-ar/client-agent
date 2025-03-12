@@ -315,24 +315,11 @@ Respond with:
     try {
       elizaLogger.info('🔄 Starting best yield search...');
       
-      // Extract token from the operation
-      const operationObjective = goal.objectives.find(obj => obj.id === 'present-operation');
-      if (!operationObjective) {
-        elizaLogger.error('No operation objective found in goal');
-        await this.failGoal(goal);
-        return;
-      }
-
-      const operation = operationObjective.description;
-      const tokenMatch = operation.match(/Find the best yield for (\w+)/);
-
-      if (!tokenMatch || !tokenMatch[1]) {
-        elizaLogger.error('Could not extract token from operation:', operation);
-        await this.failGoal(goal);
-        return;
-      }
-
-      const token = tokenMatch[1];
+      // Extract any token information from the goal name if available
+      // This is just for logging purposes now
+      const goalName = goal.name;
+      const tokenMatch = goalName.match(/from (\w+)/);
+      const token = tokenMatch ? tokenMatch[1] : 'assets';
       
       // Check if we already have a response with a valid intent from a previous step
       const existingResponse = this.getLatestResponse(goal);
@@ -381,10 +368,33 @@ Respond with:
       const accounts = await this.getAvailableAccounts();
       const chainDetailsText = this.getChainDetailsText(accounts);
       
-      elizaLogger.info('🔄 Starting best yield search for ' + token + '...');
+      elizaLogger.info('🔄 Starting best yield search for available assets...');
       
       // Generate a model-created message for yield optimization
-      const message = await generateOperationMessage(goal, chainDetailsText, this.runtime);
+      const yieldContext = `# TASK: Generate a message to ask for the best yield opportunities.
+
+Goal: ${goal.name}
+Operation: ${goal.objectives.find(obj => obj.id === 'present-operation')?.description}
+
+${chainDetailsText}
+
+Rules for the message:
+1. Ask for the best yield opportunities for available assets
+2. Use only the addresses needed for the operation
+3. Ask more generally about "finding the best yield for my assets" rather than for a specific token
+4. Be brief and clear - use simple language
+5. Indicate that you're open to swaps if they offer better yield
+6. Avoid recommendations or warnings
+7. Speak in first person
+8. Use a question format like "What are the best yield options for my assets?"
+
+Generate only the operation request text.`;
+
+      const message = await generateText({
+        runtime: this.runtime,
+        context: yieldContext,
+        modelClass: ModelClass.SMALL
+      });
       
       if (!message) {
         elizaLogger.error('Failed to generate yield optimization message');
@@ -441,10 +451,11 @@ Respond with:
           // Check if there are proposals in the response
           else if (responses[0].proposals && responses[0].proposals.length > 0) {
             // There are proposals, so we need to create a new goal to handle them
-            await this.createProposalGoal(responses[0], token);
+            const extractedToken = this.extractTokenFromProposals(responses[0].proposals);
+            await this.createProposalGoal(responses[0], extractedToken || token);
           } else {
             // No intent or proposals, we're already in the optimal position
-            elizaLogger.info(`No better yield opportunities found for ${token}`);
+            elizaLogger.info(`No better yield opportunities found for available assets`);
             await this.completeGoal(goal);
           }
         } else {
@@ -457,6 +468,37 @@ Respond with:
       elizaLogger.error('Error during find best yield:', error);
       await this.failGoal(goal);
     }
+  }
+
+  /**
+   * Tries to extract a token from proposals for logging purposes
+   */
+  private extractTokenFromProposals(proposals: any[]): string | null {
+    if (!proposals || proposals.length === 0) return null;
+    
+    const proposal = proposals[0];
+    
+    // Try to extract from calls if available
+    if (proposal.calls && proposal.calls.length > 0) {
+      const callText = proposal.calls.join(' ');
+      
+      // Look for common patterns in calls
+      const tokenPattern = /(?:deposit|withdraw|swap|transfer|send|receive|bridge)\s+(?:[\d.]+\s+)?(\w+)/i;
+      const match = callText.match(tokenPattern);
+      
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    // Try to extract from transaction data if available
+    if (proposal.transactions && proposal.transactions.length > 0) {
+      const tx = proposal.transactions[0];
+      if (tx.token) return tx.token;
+      if (tx.tokenAddress) return 'token';
+    }
+    
+    return null;
   }
 
   private async handlePresentOperation(goal: Goal): Promise<void> {
@@ -474,7 +516,30 @@ Respond with:
         const chainDetailsText = this.getChainDetailsText(accounts);
         
         // Generate a model-created message
-        const message = await generateOperationMessage(goal, chainDetailsText, this.runtime);
+        const yieldContext = `# TASK: Generate a message to ask for the best yield opportunities.
+
+Goal: ${goal.name}
+Operation: ${operationObjective.description}
+
+${chainDetailsText}
+
+Rules for the message:
+1. Ask for the best yield opportunities for available assets
+2. Use only the addresses needed for the operation
+3. Ask more generally about "finding the best yield for my assets" rather than for a specific token
+4. Be brief and clear - use simple language
+5. Indicate that you're open to swaps if they offer better yield
+6. Avoid recommendations or warnings
+7. Speak in first person
+8. Use a question format like "What are the best yield options for my assets?"
+
+Generate only the operation request text.`;
+
+        const message = await generateText({
+          runtime: this.runtime,
+          context: yieldContext,
+          modelClass: ModelClass.SMALL
+        });
         
         if (!message) {
           elizaLogger.error('Failed to generate operation message');
@@ -935,21 +1000,22 @@ Generate only the message text, no additional formatting.`;
     const balanceText = balance ? ` (${balance} available)` : '';
     const goalId = stringToUuid(`${this.runtime.character.id}-yield-${token}-${Date.now()}`);
     
+    // Store token information in the name for reference but keep the objective general
     const goal: Goal = {
       id: goalId,
-      name: `Find Best Yield for ${token}${balanceText}`,
+      name: `Find Best Yield Opportunities (from ${token}${balanceText})`,
       status: GoalStatus.IN_PROGRESS,
       roomId: this.runtime.character.id,
       userId: this.runtime.character.id,
       objectives: [
         {
           id: 'present-operation',
-          description: `Find the best yield for ${token}${balanceText}`,
+          description: `Find the best yield opportunities for my assets`,
           completed: false
         },
         {
           id: 'find-best-yield',
-          description: `Find the best yield for ${token}${balanceText}`,
+          description: `Find the best yield opportunities, including potential swaps if beneficial`,
           completed: false
         }
       ]
@@ -959,20 +1025,33 @@ Generate only the message text, no additional formatting.`;
     // Use console.log for better visibility of created goals
     console.log(`🎯 CREATED YIELD GOAL: ${goal.name} (ID: ${goal.id})`);
     console.log(`   - Objectives: ${goal.objectives.map(obj => obj.id).join(', ')}`);
+    console.log(`   - Original token: ${token}${balanceText}`);
     elizaLogger.info(`Created yield goal for ${token}:`, goal.id);
   }
 
-  private async createProposalGoal(response: ChromaResponse, token: string): Promise<void> {
+  private async createProposalGoal(response: ChromaResponse, token: string = 'assets'): Promise<void> {
     if (!response.proposals || response.proposals.length === 0) {
       return;
     }
 
     // Extract operation from the proposal
-    const operation = response.proposals[0].calls.join(' ');
+    const operation = response.proposals[0].calls?.join(' ') || 'Execute yield optimization';
+    
+    // Determine the operation type for a better goal name
+    let operationType = 'Yield';
+    if (operation.toLowerCase().includes('swap')) {
+      operationType = 'Swap';
+    } else if (operation.toLowerCase().includes('deposit')) {
+      operationType = 'Deposit';
+    } else if (operation.toLowerCase().includes('withdraw')) {
+      operationType = 'Withdraw';
+    } else if (operation.toLowerCase().includes('bridge')) {
+      operationType = 'Bridge';
+    }
 
     const goal: Goal = {
       id: stringToUuid(`${this.runtime.character.id}-proposal-${Date.now()}`),
-      name: `Execute Yield Proposal for ${token}`,
+      name: `Execute ${operationType} Operation for ${token}`,
       status: GoalStatus.IN_PROGRESS,
       roomId: this.runtime.character.id,
       userId: this.runtime.character.id,
@@ -996,7 +1075,7 @@ Generate only the message text, no additional formatting.`;
     };
 
     await this.runtime.databaseAdapter.createGoal(goal);
-    elizaLogger.info(`Created proposal goal for ${token}:`, goal.id);
+    elizaLogger.info(`Created ${operationType.toLowerCase()} proposal goal for ${token}:`, goal.id);
   }
 
   private async parseBalanceResponseAndCreateGoals(response: ChromaResponse): Promise<void> {

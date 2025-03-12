@@ -74,6 +74,39 @@ Answer only with "true" or "false".`;
 }
 
 export async function generateOperationMessage(goal: Goal, chainDetailsText: string, runtime: IAgentRuntime): Promise<string | null> {
+  // Check if this is a yield optimization goal
+  const isYieldOptimization = goal.name.includes('Yield') || 
+                             goal.objectives.some(obj => obj.description?.includes('yield'));
+  
+  // Use a specific context for yield optimization
+  if (isYieldOptimization) {
+    const yieldContext = `# TASK: Generate a message to ask for the best yield opportunities.
+
+Goal: ${goal.name}
+Operation: ${goal.objectives.find(obj => obj.id === 'present-operation')?.description}
+
+${chainDetailsText}
+
+Rules for the message:
+1. Ask for the best yield opportunities for available assets
+2. Use only the addresses needed for the operation
+3. Ask more generally about "finding the best yield for my assets" rather than for a specific token
+4. Be brief and clear - use simple language
+5. Indicate that you're open to swaps if they offer better yield
+6. Avoid recommendations or warnings
+7. Speak in first person
+8. Use a question format like "What are the best yield options for my assets?"
+
+Generate only the operation request text.`;
+
+    return generateText({
+      runtime,
+      context: yieldContext,
+      modelClass: ModelClass.SMALL
+    });
+  }
+  
+  // For other types of operations, use the original approach
   const operationContext = `# TASK: Generate a crypto operation request.
 Goal: ${goal.name}
 Operation: ${goal.objectives.find(obj => obj.id === 'present-operation')?.description}
