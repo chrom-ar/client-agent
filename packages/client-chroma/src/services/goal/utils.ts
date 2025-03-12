@@ -107,8 +107,9 @@ export async function validateOperationResponse(
   chainDetailsText: string,
   runtime: IAgentRuntime
 ): Promise<{ isValid: boolean; reason: string }> {
+  // Note: TransferIntent interface doesn't have a 'type' property, but the API response might
   // Fast path: if this is clearly a bridge intent with the required fields, accept it immediately
-  if (response?.intent?.type === 'BRIDGE' ||
+  if ((response?.intent as any)?.type === 'BRIDGE' ||
      (response?.intent &&
       response?.intent?.fromChain?.includes('sepolia') &&
       response?.intent?.recipientChain?.includes('sepolia') &&
@@ -118,9 +119,9 @@ export async function validateOperationResponse(
   }
 
   // Similarly if this is a withdraw intent with the required fields
-  if (response?.intent?.type === 'WITHDRAW' ||
+  if ((response?.intent as any)?.type === 'WITHDRAW' ||
      (response?.intent &&
-      response?.intent?.fromToken &&
+      response?.intent?.fromToken &&  // Note: using fromToken which might be API-specific
       response?.intent?.amount &&
       response?.intent?.fromAddress)) {
     elizaLogger.info('✅ Fast-track validating withdraw intent: VALID');

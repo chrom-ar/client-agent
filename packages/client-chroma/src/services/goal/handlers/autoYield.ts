@@ -334,6 +334,49 @@ Respond with:
 
       const token = tokenMatch[1];
       
+      // Check if we already have a response with a valid intent from a previous step
+      const existingResponse = this.getLatestResponse(goal);
+      
+      if (existingResponse?.intent) {
+        elizaLogger.info('Found existing intent from previous response, proceeding to confirm it');
+        this.storeResponse(goal, existingResponse);
+        
+        // Mark this objective as complete
+        await this.completeObjective(goal, 'find-best-yield');
+        
+        // Add confirm-intent and process-proposal objectives if they don't exist
+        const hasConfirmIntent = goal.objectives.some(obj => obj.id === 'confirm-intent');
+        const hasProcessProposal = goal.objectives.some(obj => obj.id === 'process-proposal');
+        
+        if (!hasConfirmIntent || !hasProcessProposal) {
+          // Add missing objectives
+          if (!hasConfirmIntent) {
+            goal.objectives.push({
+              id: 'confirm-intent',
+              description: "Confirm user intent to proceed with operation",
+              completed: false
+            });
+          }
+          
+          if (!hasProcessProposal) {
+            goal.objectives.push({
+              id: 'process-proposal',
+              description: "Process transaction proposal",
+              completed: false
+            });
+          }
+          
+          // Update the goal in the database
+          await this.runtime.databaseAdapter.updateGoal(goal);
+          elizaLogger.info('Added intent confirmation objectives to goal');
+        }
+        
+        // Process the next objective (which should be confirm-intent)
+        await this.processObjective(goal);
+        return;
+      }
+      
+      // If no existing intent, proceed with the normal flow
       // Get account information for message generation
       const accounts = await this.getAvailableAccounts();
       const chainDetailsText = this.getChainDetailsText(accounts);
@@ -362,12 +405,45 @@ Respond with:
         if (validationResult.isValid) {
           await this.completeObjective(goal, 'find-best-yield');
 
+          // Note: 'type' is not a property on TransferIntent, but the response might still have it
+          // Check if there's an intent in the response that needs confirmation
+          if (responses[0].intent) {
+            // Intent needs confirmation, add confirm-intent and process-proposal objectives if they don't exist
+            const hasConfirmIntent = goal.objectives.some(obj => obj.id === 'confirm-intent');
+            const hasProcessProposal = goal.objectives.some(obj => obj.id === 'process-proposal');
+            
+            if (!hasConfirmIntent || !hasProcessProposal) {
+              // Add missing objectives
+              if (!hasConfirmIntent) {
+                goal.objectives.push({
+                  id: 'confirm-intent',
+                  description: "Confirm user intent to proceed with operation",
+                  completed: false
+                });
+              }
+              
+              if (!hasProcessProposal) {
+                goal.objectives.push({
+                  id: 'process-proposal',
+                  description: "Process transaction proposal",
+                  completed: false
+                });
+              }
+              
+              // Update the goal in the database
+              await this.runtime.databaseAdapter.updateGoal(goal);
+              elizaLogger.info('Added intent confirmation objectives to goal');
+            }
+            
+            // Process the next objective (which should be confirm-intent)
+            await this.processObjective(goal);
+          }
           // Check if there are proposals in the response
-          if (responses[0].proposals && responses[0].proposals.length > 0) {
+          else if (responses[0].proposals && responses[0].proposals.length > 0) {
             // There are proposals, so we need to create a new goal to handle them
             await this.createProposalGoal(responses[0], token);
           } else {
-            // No proposals, we're already in the optimal position
+            // No intent or proposals, we're already in the optimal position
             elizaLogger.info(`No better yield opportunities found for ${token}`);
             await this.completeGoal(goal);
           }
@@ -452,6 +528,141 @@ Respond with:
         return;
       }
 
+      // First, check if we have an intent to confirm
+      if (latestResponse.intent) {
+        elizaLogger.info('Found intent to confirm:', latestResponse.intent);
+        
+        // Generate intent confirmation validation context
+        const intentContext = `You are validating a yield optimization intent.
+        
+Validate if this intent seems reasonable and if we should proceed with it.
+
+Intent: ${JSON.stringify(latestResponse.intent, null, 2)}
+
+Rules for validation:
+1. Check if the intent type is appropriate (YIELD, DEPOSIT, etc.)
+2. Verify the token and amount are specified
+3. Confirm the operation seems safe (depositing to known protocols, reasonable amounts)
+4. Check if chain/address information is present and valid
+5. Default to approving if the intent seems reasonable
+
+Respond with a validation result.`;
+
+        // Define schema with zod
+        const validationSchema = z.object({
+          continue: z.boolean().describe('Whether the intent is valid and we should proceed'),
+          reason: z.string().describe('Brief explanation for the decision')
+        });
+
+        try {
+          const result = await generateObject({
+            runtime: this.runtime,
+            context: intentContext,
+            schema: validationSchema,
+            modelClass: ModelClass.SMALL
+          });
+
+          const validationResult = result.object as z.infer<typeof validationSchema>;
+          
+          elizaLogger.info(`📝 Intent validation result: ${validationResult.continue ? 'VALID' : 'INVALID'}`);
+          elizaLogger.info(`📝 Reason: ${validationResult.reason}`);
+          
+          if (validationResult.continue) {
+            // Generate a confirmation message
+            const confirmContext = `# TASK: Generate a confirmation message for the intent.
+Intent: ${JSON.stringify(latestResponse.intent, null, 2)}
+Goal: ${goal.name}
+Objective: ${goal.objectives.find(obj => obj.id === 'confirm-intent')?.description}
+
+Create a very brief confirmation message that:
+1. Simply confirms we want to proceed with this intent using the word "confirm"
+2. Is direct and positive
+3. VERY IMPORTANT: Use only 2-4 words maximum, such as "Confirm" or "Yes, confirm intent"
+4. Do NOT repeat any details about the operation or parameters
+5. Do NOT include words like "I will" or any action phrase - just confirmation words
+6. Examples of good messages: "Confirm", "Yes, confirm", "Confirm intent", "Proceed with intent"
+
+Generate only the confirmation message text.`;
+
+            const confirmMessage = await generateText({
+              runtime: this.runtime,
+              context: confirmContext,
+              modelClass: ModelClass.SMALL
+            });
+            
+            // If the message is too long or contains operation details, use a fallback message
+            const isSimpleConfirmation = confirmMessage.length < 20 && 
+                                        !confirmMessage.includes((latestResponse.intent as any).amount) &&
+                                        !confirmMessage.includes((latestResponse.intent as any).fromToken) &&
+                                        !confirmMessage.includes('deposit') &&
+                                        !confirmMessage.includes('yield');
+            
+            const finalMessage = isSimpleConfirmation ? confirmMessage : "Confirm intent";
+            
+            elizaLogger.info('🤖 Agent says:', finalMessage);
+            const responses = await this.sendMessage(finalMessage);
+            elizaLogger.info('💬 Chroma replies:', responses);
+
+            if (responses && responses.length > 0) {
+              this.storeResponse(goal, responses[0]);
+              
+              // Check if we received a proposal in response
+              if (responses[0].proposals && responses[0].proposals.length > 0) {
+                await this.completeObjective(goal, 'confirm-intent');
+                
+                // Process next objective immediately
+                await this.processObjective(goal);
+              } else {
+                elizaLogger.warn('❌ No proposals received after confirming intent');
+                // Try one more time with a more explicit confirmation
+                const retryConfirmMessage = "Confirm";
+                elizaLogger.info('🤖 Agent says (retry):', retryConfirmMessage);
+                const retryResponses = await this.sendMessage(retryConfirmMessage);
+                elizaLogger.info('💬 Chroma replies (retry):', retryResponses);
+                
+                if (retryResponses && retryResponses.length > 0) {
+                  this.storeResponse(goal, retryResponses[0]);
+                  
+                  if (retryResponses[0].proposals && retryResponses[0].proposals.length > 0) {
+                    await this.completeObjective(goal, 'confirm-intent');
+                    // Process next objective immediately
+                    await this.processObjective(goal);
+                  } else {
+                    elizaLogger.error('❌ Failed to get proposals after retry');
+                    await this.failGoal(goal);
+                  }
+                }
+              }
+            }
+          } else {
+            elizaLogger.warn(`❌ Intent validation failed: ${validationResult.reason}`);
+            await this.failGoal(goal);
+          }
+        } catch (error) {
+          elizaLogger.error('Error validating intent:', error);
+          // Even if validation fails, try to proceed with confirmation as a fallback
+          const confirmMessage = "Confirm";
+          elizaLogger.info('🤖 Agent says (fallback):', confirmMessage);
+          const responses = await this.sendMessage(confirmMessage);
+          elizaLogger.info('💬 Chroma replies (fallback):', responses);
+          
+          if (responses && responses.length > 0) {
+            this.storeResponse(goal, responses[0]);
+            
+            if (responses[0].proposals && responses[0].proposals.length > 0) {
+              await this.completeObjective(goal, 'confirm-intent');
+              // Process next objective immediately
+              await this.processObjective(goal);
+            } else {
+              elizaLogger.error('❌ No proposals received in fallback');
+              await this.failGoal(goal);
+            }
+          }
+        }
+        return;
+      }
+      
+      // If we get here, we're handling a response with proposals
       // Generate intent confirmation validation context
       const intentContext = `You are validating a yield optimization proposal.
       
@@ -526,7 +737,7 @@ Generate only the confirmation message text.`;
       } catch (error) {
         elizaLogger.error('Error validating intent:', error);
         // Default to proceeding if validation fails for technical reasons
-        const confirmMessage = "Yes, please proceed.";
+        const confirmMessage = "Confirm";
         elizaLogger.info('🤖 Agent says:', confirmMessage);
         const responses = await this.sendMessage(confirmMessage);
         elizaLogger.info('💬 Chroma replies:', responses);
