@@ -285,6 +285,8 @@ export class EVMSignatureHandler extends BaseSignatureHandler {
 
       await publicClient.waitForTransactionReceipt({ hash });
 
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
       elizaLogger.info(`💳 Transaction sent: ${hash} on chain ID ${chainId}`);
       return hash;
     } catch (error) {
